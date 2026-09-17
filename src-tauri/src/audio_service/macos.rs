@@ -264,12 +264,14 @@ unsafe extern "C" fn native_event_callback(
             let bridge = shared.bridge.load(Ordering::Acquire);
             let smart_gain = shared.smart_gain.load(Ordering::Acquire);
             for mut samples in frames {
-                shared.diagnostics.decoded(&samples);
                 if smart_gain {
                     if let Ok(mut agc) = shared.agc.lock() {
                         agc.process(&mut samples, 16_000);
                     }
                 }
+                // Measure after the AGC so the level meter shows what is
+                // actually forwarded when smart gain is on.
+                shared.diagnostics.decoded(&samples);
                 let success = !bridge.is_null()
                     && axonkey_macos_audio_enqueue(bridge, samples.as_ptr(), samples.len());
                 shared.diagnostics.scheduled(samples.len(), success);

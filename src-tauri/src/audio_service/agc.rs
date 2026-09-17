@@ -6,9 +6,13 @@
 
 pub(crate) const AGC_TARGET_RMS_DB: f32 = -18.0;
 pub(crate) const AGC_MIN_GAIN_DB: f32 = -12.0;
-pub(crate) const AGC_MAX_GAIN_DB: f32 = 24.0;
+pub(crate) const AGC_MAX_GAIN_DB: f32 = 30.0;
 const AGC_ATTACK_DB_PER_SEC: f32 = 120.0;
 const AGC_RELEASE_DB_PER_SEC: f32 = 3.0;
+// Far below the target the slow release would need several seconds to catch
+// up; approach quickly first, then fine-tune slowly inside this window.
+const AGC_FAST_RELEASE_DB_PER_SEC: f32 = 24.0;
+const AGC_FAST_RELEASE_WINDOW_DB: f32 = 6.0;
 const AGC_NOISE_GATE_DB: f32 = -50.0;
 const AGC_PEAK_HEADROOM: f32 = 0.98;
 
@@ -45,6 +49,8 @@ impl AutoGain {
                 }
                 let rate = if desired < self.gain_db {
                     AGC_ATTACK_DB_PER_SEC
+                } else if desired - self.gain_db > AGC_FAST_RELEASE_WINDOW_DB {
+                    AGC_FAST_RELEASE_DB_PER_SEC
                 } else {
                     AGC_RELEASE_DB_PER_SEC
                 };
@@ -78,24 +84,36 @@ mod tests {
     }
 
     #[test]
-    fn quiet_speech_is_boosted_slowly_toward_the_target() {
-        // -40 dBFS RMS wants +22 dB, within the +24 dB cap.
+    fn quiet_speech_is_boosted_quickly_then_fine_tuned_slowly() {
+        // -40 dBFS RMS wants +22 dB, within the +30 dB cap.
         let quiet = (f32::from(i16::MAX) * 0.01) as i16;
         let mut agc = AutoGain::default();
         let mut first = vec![quiet; 240];
         agc.process(&mut first, RATE);
-        // One 15ms frame can raise the gain by at most release * duration.
+        // Far from the target the fast release applies: 24 dB/s over 15ms.
         let first_gain = agc.gain_db();
-        assert!(first_gain > 0.0 && first_gain <= AGC_RELEASE_DB_PER_SEC * 0.015 + 1e-4);
+        assert!((first_gain - AGC_FAST_RELEASE_DB_PER_SEC * 0.015).abs() < 1e-4);
         let mut second = vec![quiet; 240];
         agc.process(&mut second, RATE);
         assert!((agc.gain_db() - first_gain * 2.0).abs() < 1e-4);
         // After enough speech the gain converges near the ideal +22 dB.
-        let mut long_run = frame(800, quiet);
+        let mut long_run = frame(200, quiet);
         for frame in &mut long_run {
             agc.process(frame, RATE);
         }
         assert!((agc.gain_db() - 22.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn near_the_target_the_release_slows_down() {
+        // Only 4 dB below the ideal gain: inside the fine-tune window, one
+        // frame moves by the slow release rate.
+        let quiet = (f32::from(i16::MAX) * 0.01) as i16;
+        let mut agc = AutoGain { gain_db: 18.0 };
+        let mut frame_data = vec![quiet; 240];
+        agc.process(&mut frame_data, RATE);
+        let step = agc.gain_db() - 18.0;
+        assert!((step - AGC_RELEASE_DB_PER_SEC * 0.015).abs() < 1e-4);
     }
 
     #[test]
@@ -121,7 +139,7 @@ mod tests {
         let mut agc = AutoGain {
             gain_db: AGC_MAX_GAIN_DB,
         };
-        let mut frames = frame(20, i16::MAX);
+        let mut frames = frame(30, i16::MAX);
         for frame in &mut frames {
             agc.process(frame, RATE);
             assert!(frame.iter().all(|&s| i32::from(s).abs() <= i32::from(i16::MAX)));
@@ -159,12 +177,13 @@ mod tests {
     }
 
     #[test]
-    fn release_step_applies_gradually() {
-        // -30 dBFS speech in a fresh AGC: gain rises by one small release step.
+    fn release_step_applies_current_gain() {
+        // -30 dBFS speech in a fresh AGC is far from the target, so the first
+        // frame applies one fast-release step and scales the samples with it.
         let mut agc = AutoGain::default();
         let mut samples = vec![1000; 240];
         agc.process(&mut samples, RATE);
-        assert!(agc.gain_db() > 0.0 && agc.gain_db() < 0.1);
+        assert!((agc.gain_db() - AGC_FAST_RELEASE_DB_PER_SEC * 0.015).abs() < 1e-4);
         let expected = 10_f32.powf(agc.gain_db() / 20.0);
         assert!(samples
             .iter()

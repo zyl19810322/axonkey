@@ -77,8 +77,11 @@ export function AudioTestDialog({ platform, nativeRuntime, audioGain, gainError,
             : status.forwarding ? '语音通道已开启，暂未检测到声音。请靠近遥控器说话。'
               : '已连接，请按住遥控器语音键开始说话。')
   const deviceName = platform === 'windows' ? 'CABLE Output' : 'MiRemoteV 2ch'
-  const adjustedPeak = gainAdjustedLevel(level.peak, audioGain)
-  const adjustedMaximum = gainAdjustedLevel(maximum, audioGain)
+  // With smart gain on, the native side measures levels after the AGC, so the
+  // manual gain estimate must not be applied on top.
+  const displayGain = smartGain ? 0 : audioGain
+  const adjustedPeak = gainAdjustedLevel(level.peak, displayGain)
+  const adjustedMaximum = gainAdjustedLevel(maximum, displayGain)
   const tone = gainLevelTone(adjustedPeak)
   const meterValue = adjustedPeak > 0 ? Math.max(0, Math.min(100, (20 * Math.log10(adjustedPeak) + 60) / 60 * 100)) : 0
   const ready = supported && !!status?.driverInstalled && !!status.bluetoothConnected && !error && !status.error && !gainError
@@ -130,8 +133,8 @@ export function AudioTestDialog({ platform, nativeRuntime, audioGain, gainError,
       <section className="audio-test-stage-panel" aria-label="语音通道状态"><h3>语音通道状态</h3><div className="audio-test-stage-list"><span>音频驱动：{status?.driverInstalled ? '已安装' : '未安装'}</span><span>RC003 语音连接：{status?.bluetoothConnected ? '已连接' : '等待连接'}</span><span>语音收音：{status?.forwarding ? '已收到数据' : '暂无数据'}</span><span>语音转发：{status?.forwarding ? '正在转发到 CABLE Input' : '未转发'}</span></div></section>
       <details className="audio-test-details">
         <summary>详细电平与测量说明</summary>
-        <dl><div><dt>原始峰值</dt><dd>{decibels(level.peak)}</dd></div><div><dt>增益后估算</dt><dd>{decibels(adjustedPeak)}</dd></div><div><dt>本次最高估算</dt><dd>{decibels(adjustedMaximum)}</dd></div></dl>
-        <dl><div><dt>原始 RMS</dt><dd>{decibels(level.rms)}</dd></div><div><dt>估算 RMS</dt><dd>{decibels(gainAdjustedLevel(level.rms, audioGain))}</dd></div><div><dt>参考峰值范围</dt><dd>−24 至 −6 dBFS</dd></div></dl>
+        <dl><div><dt>{smartGain ? '实测峰值（已含智能增益）' : '原始峰值'}</dt><dd>{decibels(level.peak)}</dd></div>{!smartGain && <div><dt>增益后估算</dt><dd>{decibels(adjustedPeak)}</dd></div>}<div><dt>{smartGain ? '本次最高实测' : '本次最高估算'}</dt><dd>{decibels(adjustedMaximum)}</dd></div></dl>
+        <dl><div><dt>{smartGain ? '实测 RMS（已含智能增益）' : '原始 RMS'}</dt><dd>{decibels(level.rms)}</dd></div>{!smartGain && <div><dt>估算 RMS</dt><dd>{decibels(gainAdjustedLevel(level.rms, displayGain))}</dd></div>}<div><dt>参考峰值范围</dt><dd>−24 至 −6 dBFS</dd></div></dl>
         <p className="audio-test-note">每次语音开始后的前 200ms 不参与测试电平和增益建议，实际转发音频不受影响。测试峰值再剔除每批振幅最高的 1% 样本（不足 100 个时不剔除），这项过滤不改变 RMS。增益后数值是估算，超过 0 dBFS 表示削波风险，短暂削波仍可能被过滤。建议不能区分语音与噪声，请以录音回放为准；本窗口不播放或保存录音。</p>
       </details>
       <footer><button type="button" className="dialog-secondary" onClick={onClose}>关闭</button></footer>

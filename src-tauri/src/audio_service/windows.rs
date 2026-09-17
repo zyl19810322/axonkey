@@ -999,9 +999,6 @@ fn handle_audio_packet(shared: &Shared, bytes: &[u8]) {
     if frames.is_empty() {
         return;
     }
-    for frame in &frames {
-        shared.diagnostics.decoded(frame);
-    }
     if let Ok(mut queued) = shared.samples.lock() {
         let smart_gain = shared.smart_gain.load(Ordering::Acquire);
         for mut frame in frames {
@@ -1010,6 +1007,9 @@ fn handle_audio_packet(shared: &Shared, bytes: &[u8]) {
                     agc.process(&mut frame, SOURCE_SAMPLE_RATE);
                 }
             }
+            // Measure after the AGC so the level meter shows what is
+            // actually forwarded when smart gain is on.
+            shared.diagnostics.decoded(&frame);
             let overflow = queued
                 .len()
                 .saturating_add(frame.len())
@@ -1020,6 +1020,10 @@ fn handle_audio_packet(shared: &Shared, bytes: &[u8]) {
                 shared.diagnostics.overflow(remove);
             }
             queued.extend(frame);
+        }
+    } else {
+        for frame in &frames {
+            shared.diagnostics.decoded(frame);
         }
     }
 }
