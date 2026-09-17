@@ -157,13 +157,14 @@ fn render_badge(
 }
 
 // Square badge for both platforms; the percentage sign is dropped to keep the
-// digits large enough to read in the tray slot.
+// digits large enough to read in the tray slot. Two digits use the largest
+// scale that still fits the canvas; three digits (100) shrink one step.
 fn battery_badge_square(level: Option<u8>) -> (Vec<u8>, u32, u32) {
     let text = match level {
         Some(level) => format!("{level}"),
         None => "--".to_string(),
     };
-    let glyph_scale = if text.len() >= 3 { 3 } else { 4 };
+    let glyph_scale = if text.len() >= 3 { 3 } else { 5 };
     render_badge(&text, glyph_scale, 0, 0, 14, Some((64, 64)))
 }
 
@@ -1540,5 +1541,6 @@ mod tests {
         assert!(!launched_by_autostart(&["axonkey".into(), "--auto-launched=1".into()]));
     }
 }
+
 
 
