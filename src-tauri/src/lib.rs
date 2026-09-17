@@ -8,6 +8,7 @@ use tauri::{Manager, PhysicalPosition, PhysicalSize};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 const MAIN_WINDOW_LABEL: &str = "main";
+const TRAY_BATTERY_ID: &str = "tray-battery";
 const TRAY_SHOW_ID: &str = "tray-show";
 const TRAY_QUIT_ID: &str = "tray-quit";
 const PERMISSION_HELPER_WIDTH: f64 = 430.0;
@@ -29,6 +30,25 @@ struct WindowGeometry {
 
 #[derive(Default)]
 struct PermissionHelperWindowState(std::sync::Mutex<Option<WindowGeometry>>);
+
+#[derive(Default)]
+struct TrayBatteryMenuItem(
+    std::sync::Mutex<Option<tauri::menu::MenuItem<tauri::Wry>>>,
+);
+
+fn tray_battery_text(level: Option<u8>) -> String {
+    match level {
+        Some(level) => format!("遥控器电量：{level}%"),
+        None => "遥控器未连接".to_string(),
+    }
+}
+
+fn tray_tooltip_text(level: Option<u8>) -> String {
+    match level {
+        Some(level) => format!("Axonkey · 遥控器电量 {level}%"),
+        None => "Axonkey".to_string(),
+    }
+}
 
 fn initialize_autostart(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     use tauri_plugin_autostart::ManagerExt;
@@ -192,9 +212,10 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
         tray::TrayIconBuilder,
     };
 
+    let battery = MenuItem::with_id(app, TRAY_BATTERY_ID, tray_battery_text(None), false, None::<&str>)?;
     let show = MenuItem::with_id(app, TRAY_SHOW_ID, "显示 Axonkey", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "退出 Axonkey", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let menu = Menu::with_items(app, &[&battery, &show, &quit])?;
     let tray = TrayIconBuilder::with_id("axonkey-tray")
         .icon(tauri::include_image!("./icons/32x32.png"))
         .tooltip("Axonkey")
@@ -227,6 +248,8 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
     };
 
     tray.build(app)?;
+    app.handle()
+        .manage(TrayBatteryMenuItem(std::sync::Mutex::new(Some(battery))));
     Ok(())
 }
 
@@ -930,6 +953,35 @@ async fn probe_rc003_battery_level(app: tauri::AppHandle) -> Option<u8> {
 }
 
 #[tauri::command]
+fn set_tray_battery(app: tauri::AppHandle, level: Option<u8>) -> Result<(), String> {
+    let level = level.filter(|value| *value <= 100);
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        if let Some(state) = app.try_state::<TrayBatteryMenuItem>() {
+            let item = state
+                .0
+                .lock()
+                .map_err(|_| "Tray battery menu item is unavailable".to_string())?;
+            if let Some(item) = item.as_ref() {
+                item.set_text(tray_battery_text(level))
+                    .map_err(|error| format!("Cannot update the tray battery label: {error}"))?;
+            }
+        }
+        if let Some(tray) = app.tray_by_id("axonkey-tray") {
+            tray.set_tooltip(Some(tray_tooltip_text(level)))
+                .map_err(|error| format!("Cannot update the tray tooltip: {error}"))?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = (app, level);
+        Ok(())
+    }
+}
+
+#[tauri::command]
 fn probe_audio_available(audio_service: tauri::State<'_, AudioService>) -> Result<bool, String> {
     #[cfg(target_os = "windows")]
     {
@@ -1265,6 +1317,7 @@ pub fn run() {
             set_audio_gain,
             probe_rc003_connected,
             probe_rc003_battery_level,
+            set_tray_battery,
             update_input_settings,
             get_extra_keys_status,
             set_extra_keys_enabled,
@@ -1289,7 +1342,8 @@ pub fn run() {
 mod tests {
     use super::{
         app_bundle_for_executable, launched_by_autostart, parse_battery_level, rc003_connected,
-        silent_start_enabled_in, write_silent_start, AUTO_LAUNCH_ARG,
+        silent_start_enabled_in, tray_battery_text, tray_tooltip_text, write_silent_start,
+        AUTO_LAUNCH_ARG,
     };
 
     #[test]
@@ -1306,6 +1360,15 @@ mod tests {
         assert_eq!(parse_battery_level("100"), Some(100));
         assert_eq!(parse_battery_level("101"), None);
         assert_eq!(parse_battery_level("unknown"), None);
+    }
+
+    #[test]
+    fn tray_texts_reflect_battery_state() {
+        assert_eq!(tray_battery_text(Some(85)), "遥控器电量：85%");
+        assert_eq!(tray_battery_text(Some(0)), "遥控器电量：0%");
+        assert_eq!(tray_battery_text(None), "遥控器未连接");
+        assert_eq!(tray_tooltip_text(Some(85)), "Axonkey · 遥控器电量 85%");
+        assert_eq!(tray_tooltip_text(None), "Axonkey");
     }
 
     #[test]
