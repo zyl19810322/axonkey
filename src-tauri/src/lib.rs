@@ -8,7 +8,8 @@ use tauri::{Manager, PhysicalPosition, PhysicalSize};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 const MAIN_WINDOW_LABEL: &str = "main";
-const TRAY_BATTERY_ID: &str = "tray-battery";
+const TRAY_ID: &str = "axonkey-tray";
+const TRAY_BATTERY_ICON_ID: &str = "axonkey-battery-tray";
 const TRAY_SHOW_ID: &str = "tray-show";
 const TRAY_QUIT_ID: &str = "tray-quit";
 const PERMISSION_HELPER_WIDTH: f64 = 430.0;
@@ -31,23 +32,100 @@ struct WindowGeometry {
 #[derive(Default)]
 struct PermissionHelperWindowState(std::sync::Mutex<Option<WindowGeometry>>);
 
-#[derive(Default)]
-struct TrayBatteryMenuItem(
-    std::sync::Mutex<Option<tauri::menu::MenuItem<tauri::Wry>>>,
-);
-
-fn tray_battery_text(level: Option<u8>) -> String {
+fn tray_tooltip_text(level: Option<u8>) -> String {
     match level {
-        Some(level) => format!("遥控器电量：{level}%"),
+        Some(level) => format!("遥控器电量 {level}%"),
         None => "遥控器未连接".to_string(),
     }
 }
 
-fn tray_tooltip_text(level: Option<u8>) -> String {
-    match level {
-        Some(level) => format!("Axonkey · 遥控器电量 {level}%"),
-        None => "Axonkey".to_string(),
+// 5x7 bitmap glyphs for the battery badge; each row uses the low 5 bits.
+fn badge_glyph_rows(ch: u8) -> [u8; 7] {
+    match ch {
+        b'0' => [14, 17, 19, 21, 25, 17, 14],
+        b'1' => [4, 12, 4, 4, 4, 4, 14],
+        b'2' => [14, 17, 1, 6, 8, 16, 31],
+        b'3' => [31, 2, 4, 2, 1, 17, 14],
+        b'4' => [2, 6, 10, 18, 31, 2, 2],
+        b'5' => [31, 16, 30, 1, 1, 17, 14],
+        b'6' => [6, 8, 16, 30, 17, 17, 14],
+        b'7' => [31, 1, 2, 4, 8, 8, 8],
+        b'8' => [14, 17, 17, 14, 17, 17, 14],
+        b'9' => [14, 17, 17, 15, 1, 2, 12],
+        b'%' => [25, 26, 2, 4, 8, 11, 19],
+        b'-' => [0, 0, 0, 31, 0, 0, 0],
+        _ => [0; 7],
     }
+}
+
+fn inside_pill(x: u32, y: u32, width: u32, height: u32) -> bool {
+    let radius = height / 2;
+    if x >= radius && x < width - radius {
+        return true;
+    }
+    let center_x = if x < radius { radius } else { width - radius - 1 };
+    let center_y = height / 2;
+    let dx = x as i64 - center_x as i64;
+    let dy = y as i64 - center_y as i64;
+    dx * dx + dy * dy <= radius as i64 * radius as i64
+}
+
+// Renders the battery percentage as a rounded-rectangle badge shown next to
+// the main tray icon. Returns (rgba, width, height).
+fn render_battery_badge(level: Option<u8>) -> (Vec<u8>, u32, u32) {
+    const SCALE: u32 = 3;
+    const GLYPH_W: u32 = 5;
+    const GLYPH_H: u32 = 7;
+    const GLYPH_GAP: u32 = 1;
+    const PAD_X: u32 = 5;
+    const PAD_Y: u32 = 3;
+
+    let text = match level {
+        Some(level) => format!("{level}%"),
+        None => "--".to_string(),
+    };
+    let glyph_count = text.len() as u32;
+    let text_width = (glyph_count * (GLYPH_W + GLYPH_GAP) - GLYPH_GAP) * SCALE;
+    let width = text_width + PAD_X * 2 * SCALE;
+    let height = GLYPH_H * SCALE + PAD_Y * 2 * SCALE;
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+
+    for y in 0..height {
+        for x in 0..width {
+            if inside_pill(x, y, width, height) {
+                let offset = ((y * width + x) * 4) as usize;
+                rgba[offset..offset + 4].copy_from_slice(&[30, 30, 30, 235]);
+            }
+        }
+    }
+
+    let mut origin_x = PAD_X * SCALE;
+    for ch in text.bytes() {
+        let rows = badge_glyph_rows(ch);
+        for (row, bits) in rows.iter().enumerate() {
+            for col in 0..GLYPH_W {
+                if bits & (1 << (GLYPH_W - 1 - col)) == 0 {
+                    continue;
+                }
+                for dy in 0..SCALE {
+                    for dx in 0..SCALE {
+                        let x = origin_x + col * SCALE + dx;
+                        let y = (PAD_Y + row as u32) * SCALE + dy;
+                        let offset = ((y * width + x) * 4) as usize;
+                        rgba[offset..offset + 4].copy_from_slice(&[255, 255, 255, 255]);
+                    }
+                }
+            }
+        }
+        origin_x += (GLYPH_W + GLYPH_GAP) * SCALE;
+    }
+
+    (rgba, width, height)
+}
+
+fn battery_badge_image(level: Option<u8>) -> tauri::image::Image<'static> {
+    let (rgba, width, height) = render_battery_badge(level);
+    tauri::image::Image::new_owned(rgba, width, height)
 }
 
 fn initialize_autostart(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
@@ -212,11 +290,44 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
         tray::TrayIconBuilder,
     };
 
-    let battery = MenuItem::with_id(app, TRAY_BATTERY_ID, tray_battery_text(None), false, None::<&str>)?;
     let show = MenuItem::with_id(app, TRAY_SHOW_ID, "显示 Axonkey", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "退出 Axonkey", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&battery, &show, &quit])?;
-    let tray = TrayIconBuilder::with_id("axonkey-tray")
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+
+    let battery = TrayIconBuilder::with_id(TRAY_BATTERY_ICON_ID)
+        .icon(battery_badge_image(None))
+        .tooltip(tray_tooltip_text(None))
+        .menu(&menu)
+        .on_menu_event(|app, event| {
+            if event.id() == TRAY_SHOW_ID {
+                show_main_window(app);
+            } else if event.id() == TRAY_QUIT_ID {
+                app.exit(0);
+            }
+        });
+
+    #[cfg(target_os = "windows")]
+    let battery = {
+        use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+
+        battery
+            .show_menu_on_left_click(false)
+            .on_tray_icon_event(|tray, event| {
+                if matches!(
+                    event,
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    }
+                ) {
+                    show_main_window(tray.app_handle());
+                }
+            })
+    };
+    battery.build(app)?;
+
+    let tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(tauri::include_image!("./icons/32x32.png"))
         .tooltip("Axonkey")
         .menu(&menu)
@@ -248,8 +359,6 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
     };
 
     tray.build(app)?;
-    app.handle()
-        .manage(TrayBatteryMenuItem(std::sync::Mutex::new(Some(battery))));
     Ok(())
 }
 
@@ -957,19 +1066,11 @@ fn set_tray_battery(app: tauri::AppHandle, level: Option<u8>) -> Result<(), Stri
     let level = level.filter(|value| *value <= 100);
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
-        if let Some(state) = app.try_state::<TrayBatteryMenuItem>() {
-            let item = state
-                .0
-                .lock()
-                .map_err(|_| "Tray battery menu item is unavailable".to_string())?;
-            if let Some(item) = item.as_ref() {
-                item.set_text(tray_battery_text(level))
-                    .map_err(|error| format!("Cannot update the tray battery label: {error}"))?;
-            }
-        }
-        if let Some(tray) = app.tray_by_id("axonkey-tray") {
+        if let Some(tray) = app.tray_by_id(TRAY_BATTERY_ICON_ID) {
+            tray.set_icon(Some(battery_badge_image(level)))
+                .map_err(|error| format!("Cannot update the tray battery badge: {error}"))?;
             tray.set_tooltip(Some(tray_tooltip_text(level)))
-                .map_err(|error| format!("Cannot update the tray tooltip: {error}"))?;
+                .map_err(|error| format!("Cannot update the tray battery tooltip: {error}"))?;
         }
         Ok(())
     }
@@ -1342,7 +1443,7 @@ pub fn run() {
 mod tests {
     use super::{
         app_bundle_for_executable, launched_by_autostart, parse_battery_level, rc003_connected,
-        silent_start_enabled_in, tray_battery_text, tray_tooltip_text, write_silent_start,
+        render_battery_badge, silent_start_enabled_in, tray_tooltip_text, write_silent_start,
         AUTO_LAUNCH_ARG,
     };
 
@@ -1363,12 +1464,30 @@ mod tests {
     }
 
     #[test]
-    fn tray_texts_reflect_battery_state() {
-        assert_eq!(tray_battery_text(Some(85)), "遥控器电量：85%");
-        assert_eq!(tray_battery_text(Some(0)), "遥控器电量：0%");
-        assert_eq!(tray_battery_text(None), "遥控器未连接");
-        assert_eq!(tray_tooltip_text(Some(85)), "Axonkey · 遥控器电量 85%");
-        assert_eq!(tray_tooltip_text(None), "Axonkey");
+    fn tray_badge_renders_pill_with_text() {
+        let (rgba, width, height) = render_battery_badge(Some(85));
+        assert!(width > height);
+        assert_eq!(rgba.len() as u32, width * height * 4);
+
+        let pixel = |x: u32, y: u32| &rgba[((y * width + x) * 4) as usize..][..4];
+        // Pill corners stay transparent, the center is the dark background,
+        // and the digits paint white pixels somewhere inside.
+        assert_eq!(pixel(0, 0)[3], 0);
+        assert_eq!(pixel(width - 1, height - 1)[3], 0);
+        assert!(pixel(width / 2, height / 2)[3] > 0);
+        assert!(rgba
+            .chunks_exact(4)
+            .any(|px| px == [255, 255, 255, 255]));
+
+        let (wide, wide_width, _) = render_battery_badge(Some(100));
+        assert!(wide_width > width);
+        assert!(!wide.is_empty());
+    }
+
+    #[test]
+    fn tray_tooltip_reflects_battery_state() {
+        assert_eq!(tray_tooltip_text(Some(85)), "遥控器电量 85%");
+        assert_eq!(tray_tooltip_text(None), "遥控器未连接");
     }
 
     #[test]
@@ -1404,3 +1523,4 @@ mod tests {
         assert!(!launched_by_autostart(&["axonkey".into(), "--auto-launched=1".into()]));
     }
 }
+
