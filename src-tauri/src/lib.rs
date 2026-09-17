@@ -58,48 +58,82 @@ fn badge_glyph_rows(ch: u8) -> [u8; 7] {
     }
 }
 
-fn inside_pill(x: u32, y: u32, width: u32, height: u32) -> bool {
-    let radius = height / 2;
-    if x >= radius && x < width - radius {
+fn inside_rounded_rect(x: u32, y: u32, width: u32, height: u32, radius: u32) -> bool {
+    if (x >= radius && x < width - radius) || (y >= radius && y < height - radius) {
         return true;
     }
     let center_x = if x < radius { radius } else { width - radius - 1 };
-    let center_y = height / 2;
+    let center_y = if y < radius { radius } else { height - radius - 1 };
     let dx = x as i64 - center_x as i64;
     let dy = y as i64 - center_y as i64;
     dx * dx + dy * dy <= radius as i64 * radius as i64
 }
 
-// Renders the battery percentage as a rounded-rectangle badge shown next to
-// the main tray icon. Returns (rgba, width, height).
-fn render_battery_badge(level: Option<u8>) -> (Vec<u8>, u32, u32) {
-    const SCALE: u32 = 3;
+fn downsample_2x(rgba: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
+    let (out_width, out_height) = (width / 2, height / 2);
+    let mut out = vec![0u8; (out_width * out_height * 4) as usize];
+    for y in 0..out_height {
+        for x in 0..out_width {
+            let mut sum = [0u32; 4];
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let offset = (((y * 2 + dy) * width + x * 2 + dx) * 4) as usize;
+                    for (channel, value) in sum.iter_mut().enumerate() {
+                        *value += rgba[offset + channel] as u32;
+                    }
+                }
+            }
+            let offset = ((y * out_width + x) * 4) as usize;
+            for (channel, value) in sum.iter().enumerate() {
+                out[offset + channel] = (value / 4) as u8;
+            }
+        }
+    }
+    (out, out_width, out_height)
+}
+
+// Renders the battery text on a rounded-rectangle badge. All sizes are final
+// pixels; rendering happens at 2x and is downsampled for smooth edges.
+// `fixed_size` forces a canvas (used for the square Windows badge) and centers
+// the text; otherwise the canvas hugs the text with the given padding.
+fn render_badge(
+    text: &str,
+    glyph_scale: u32,
+    pad_x: u32,
+    pad_y: u32,
+    corner_radius: u32,
+    fixed_size: Option<(u32, u32)>,
+) -> (Vec<u8>, u32, u32) {
+    const SS: u32 = 2;
     const GLYPH_W: u32 = 5;
     const GLYPH_H: u32 = 7;
     const GLYPH_GAP: u32 = 1;
-    const PAD_X: u32 = 5;
-    const PAD_Y: u32 = 3;
 
-    let text = match level {
-        Some(level) => format!("{level}%"),
-        None => "--".to_string(),
-    };
     let glyph_count = text.len() as u32;
-    let text_width = (glyph_count * (GLYPH_W + GLYPH_GAP) - GLYPH_GAP) * SCALE;
-    let width = text_width + PAD_X * 2 * SCALE;
-    let height = GLYPH_H * SCALE + PAD_Y * 2 * SCALE;
+    let text_width = (glyph_count * (GLYPH_W + GLYPH_GAP) - GLYPH_GAP) * glyph_scale * SS;
+    let text_height = GLYPH_H * glyph_scale * SS;
+    let (width, height) = match fixed_size {
+        Some((width, height)) => (width * SS, height * SS),
+        None => (
+            text_width + pad_x * 2 * SS,
+            text_height + pad_y * 2 * SS,
+        ),
+    };
+    let origin_x = (width - text_width) / 2;
+    let origin_y = (height - text_height) / 2;
     let mut rgba = vec![0u8; (width * height * 4) as usize];
 
     for y in 0..height {
         for x in 0..width {
-            if inside_pill(x, y, width, height) {
+            if inside_rounded_rect(x, y, width, height, corner_radius * SS) {
                 let offset = ((y * width + x) * 4) as usize;
                 rgba[offset..offset + 4].copy_from_slice(&[30, 30, 30, 235]);
             }
         }
     }
 
-    let mut origin_x = PAD_X * SCALE;
+    let scale = glyph_scale * SS;
+    let mut cursor_x = origin_x;
     for ch in text.bytes() {
         let rows = badge_glyph_rows(ch);
         for (row, bits) in rows.iter().enumerate() {
@@ -107,20 +141,47 @@ fn render_battery_badge(level: Option<u8>) -> (Vec<u8>, u32, u32) {
                 if bits & (1 << (GLYPH_W - 1 - col)) == 0 {
                     continue;
                 }
-                for dy in 0..SCALE {
-                    for dx in 0..SCALE {
-                        let x = origin_x + col * SCALE + dx;
-                        let y = (PAD_Y + row as u32) * SCALE + dy;
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let x = cursor_x + col * scale + dx;
+                        let y = origin_y + row as u32 * scale + dy;
                         let offset = ((y * width + x) * 4) as usize;
                         rgba[offset..offset + 4].copy_from_slice(&[255, 255, 255, 255]);
                     }
                 }
             }
         }
-        origin_x += (GLYPH_W + GLYPH_GAP) * SCALE;
+        cursor_x += (GLYPH_W + GLYPH_GAP) * scale;
     }
 
-    (rgba, width, height)
+    downsample_2x(&rgba, width, height)
+}
+
+// macOS menu bar: pill badge, 22pt tall at 2x so no scaling blur.
+fn battery_badge_pill(level: Option<u8>) -> (Vec<u8>, u32, u32) {
+    let text = match level {
+        Some(level) => format!("{level}%"),
+        None => "--".to_string(),
+    };
+    render_badge(&text, 4, 6, 8, 22, None)
+}
+
+// Windows tray slots are square; the percentage sign is dropped to keep the
+// digits large enough to read.
+fn battery_badge_square(level: Option<u8>) -> (Vec<u8>, u32, u32) {
+    let text = match level {
+        Some(level) => format!("{level}"),
+        None => "--".to_string(),
+    };
+    let glyph_scale = if text.len() >= 3 { 3 } else { 4 };
+    render_badge(&text, glyph_scale, 0, 0, 14, Some((64, 64)))
+}
+
+fn render_battery_badge(level: Option<u8>) -> (Vec<u8>, u32, u32) {
+    #[cfg(target_os = "windows")]
+    return battery_badge_square(level);
+    #[cfg(not(target_os = "windows"))]
+    battery_badge_pill(level)
 }
 
 fn battery_badge_image(level: Option<u8>) -> tauri::image::Image<'static> {
@@ -1442,9 +1503,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_bundle_for_executable, launched_by_autostart, parse_battery_level, rc003_connected,
-        render_battery_badge, silent_start_enabled_in, tray_tooltip_text, write_silent_start,
-        AUTO_LAUNCH_ARG,
+        app_bundle_for_executable, battery_badge_pill, battery_badge_square,
+        launched_by_autostart, parse_battery_level, rc003_connected, silent_start_enabled_in,
+        tray_tooltip_text, write_silent_start, AUTO_LAUNCH_ARG,
     };
 
     #[test]
@@ -1465,13 +1526,14 @@ mod tests {
 
     #[test]
     fn tray_badge_renders_pill_with_text() {
-        let (rgba, width, height) = render_battery_badge(Some(85));
+        let (rgba, width, height) = battery_badge_pill(Some(85));
         assert!(width > height);
+        assert_eq!(height, 44);
         assert_eq!(rgba.len() as u32, width * height * 4);
 
         let pixel = |x: u32, y: u32| &rgba[((y * width + x) * 4) as usize..][..4];
-        // Pill corners stay transparent, the center is the dark background,
-        // and the digits paint white pixels somewhere inside.
+        // Pill corners stay transparent, the center is filled, and the
+        // digits paint white pixels somewhere inside.
         assert_eq!(pixel(0, 0)[3], 0);
         assert_eq!(pixel(width - 1, height - 1)[3], 0);
         assert!(pixel(width / 2, height / 2)[3] > 0);
@@ -1479,9 +1541,26 @@ mod tests {
             .chunks_exact(4)
             .any(|px| px == [255, 255, 255, 255]));
 
-        let (wide, wide_width, _) = render_battery_badge(Some(100));
+        let (wide, wide_width, _) = battery_badge_pill(Some(100));
         assert!(wide_width > width);
         assert!(!wide.is_empty());
+    }
+
+    #[test]
+    fn tray_badge_square_fits_windows_tray_slot() {
+        let (rgba, width, height) = battery_badge_square(Some(85));
+        assert_eq!((width, height), (64, 64));
+        assert_eq!(rgba.len() as u32, width * height * 4);
+
+        let pixel = |x: u32, y: u32| &rgba[((y * width + x) * 4) as usize..][..4];
+        assert_eq!(pixel(0, 0)[3], 0);
+        assert!(pixel(32, 32)[3] > 0);
+        assert!(rgba
+            .chunks_exact(4)
+            .any(|px| px == [255, 255, 255, 255]));
+
+        let (_, wide_width, wide_height) = battery_badge_square(Some(100));
+        assert_eq!((wide_width, wide_height), (64, 64));
     }
 
     #[test]
@@ -1523,4 +1602,5 @@ mod tests {
         assert!(!launched_by_autostart(&["axonkey".into(), "--auto-launched=1".into()]));
     }
 }
+
 
