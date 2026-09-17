@@ -98,6 +98,7 @@ fn downsample_2x(rgba: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
 fn render_badge(
     text: &str,
     glyph_scale: u32,
+    glyph_scale_y: u32,
     pad_x: u32,
     pad_y: u32,
     corner_radius: u32,
@@ -110,7 +111,7 @@ fn render_badge(
 
     let glyph_count = text.len() as u32;
     let text_width = (glyph_count * (GLYPH_W + GLYPH_GAP) - GLYPH_GAP) * glyph_scale * SS;
-    let text_height = GLYPH_H * glyph_scale * SS;
+    let text_height = GLYPH_H * glyph_scale_y * SS;
     let (width, height) = match fixed_size {
         Some((width, height)) => (width * SS, height * SS),
         None => (
@@ -131,7 +132,8 @@ fn render_badge(
         }
     }
 
-    let scale = glyph_scale * SS;
+    let scale_x = glyph_scale * SS;
+    let scale_y = glyph_scale_y * SS;
     let mut cursor_x = origin_x;
     for ch in text.bytes() {
         let rows = badge_glyph_rows(ch);
@@ -140,32 +142,33 @@ fn render_badge(
                 if bits & (1 << (GLYPH_W - 1 - col)) == 0 {
                     continue;
                 }
-                for dy in 0..scale {
-                    for dx in 0..scale {
-                        let x = cursor_x + col * scale + dx;
-                        let y = origin_y + row as u32 * scale + dy;
+                for dy in 0..scale_y {
+                    for dx in 0..scale_x {
+                        let x = cursor_x + col * scale_x + dx;
+                        let y = origin_y + row as u32 * scale_y + dy;
                         let offset = ((y * width + x) * 4) as usize;
                         rgba[offset..offset + 4].copy_from_slice(&[255, 255, 255, 255]);
                     }
                 }
             }
         }
-        cursor_x += (GLYPH_W + GLYPH_GAP) * scale;
+        cursor_x += (GLYPH_W + GLYPH_GAP) * scale_x;
     }
 
     downsample_2x(&rgba, width, height)
 }
 
 // Square badge for both platforms; the percentage sign is dropped to keep the
-// digits large enough to read in the tray slot. Two digits use the largest
-// scale that still fits the canvas; three digits (100) shrink one step.
+// digits large enough to read in the tray slot. Two digits stretch slightly
+// taller than wide so the badge reads as large as neighboring tray icons;
+// three digits (100) shrink one step.
 fn battery_badge_square(level: Option<u8>) -> (Vec<u8>, u32, u32) {
     let text = match level {
         Some(level) => format!("{level}"),
         None => "--".to_string(),
     };
-    let glyph_scale = if text.len() >= 3 { 3 } else { 5 };
-    render_badge(&text, glyph_scale, 0, 0, 14, Some((64, 64)))
+    let (glyph_scale, glyph_scale_y) = if text.len() >= 3 { (3, 3) } else { (5, 6) };
+    render_badge(&text, glyph_scale, glyph_scale_y, 0, 0, 6, Some((64, 64)))
 }
 
 fn battery_badge_image(level: Option<u8>) -> tauri::image::Image<'static> {
@@ -1541,6 +1544,7 @@ mod tests {
         assert!(!launched_by_autostart(&["axonkey".into(), "--auto-launched=1".into()]));
     }
 }
+
 
 
 
