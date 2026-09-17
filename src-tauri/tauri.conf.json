@@ -29,9 +29,9 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYwRTU5Qjk2OTU5QkYyNjUKUldSbDhwdVZscHZsWU5MRi9PdGVZMlpzQTZEV29rbWNXUnc0Q1pWaFNYRGJTYkNWTFlUM05TL3kK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEzRDc5QUYzNTZFNzY4RDYKUldUV2FPZFc4NXJYbzVST0F6d3lsL1Z0UFA5SVRFaVdIUENwQk03QkJMRThpMC96dHdKL3d6UmEK",
       "endpoints": [
-        "https://github.com/leowzz/axonkey/releases/latest/download/latest.json"
+        "https://github.com/zyl19810322/axonkey/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"
