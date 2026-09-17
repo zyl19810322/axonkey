@@ -157,17 +157,8 @@ fn render_badge(
     downsample_2x(&rgba, width, height)
 }
 
-// macOS menu bar: pill badge, 22pt tall at 2x so no scaling blur.
-fn battery_badge_pill(level: Option<u8>) -> (Vec<u8>, u32, u32) {
-    let text = match level {
-        Some(level) => format!("{level}%"),
-        None => "--".to_string(),
-    };
-    render_badge(&text, 4, 6, 8, 22, None)
-}
-
-// Windows tray slots are square; the percentage sign is dropped to keep the
-// digits large enough to read.
+// Square badge for both platforms; the percentage sign is dropped to keep the
+// digits large enough to read in the tray slot.
 fn battery_badge_square(level: Option<u8>) -> (Vec<u8>, u32, u32) {
     let text = match level {
         Some(level) => format!("{level}"),
@@ -177,15 +168,8 @@ fn battery_badge_square(level: Option<u8>) -> (Vec<u8>, u32, u32) {
     render_badge(&text, glyph_scale, 0, 0, 14, Some((64, 64)))
 }
 
-fn render_battery_badge(level: Option<u8>) -> (Vec<u8>, u32, u32) {
-    #[cfg(target_os = "windows")]
-    return battery_badge_square(level);
-    #[cfg(not(target_os = "windows"))]
-    battery_badge_pill(level)
-}
-
 fn battery_badge_image(level: Option<u8>) -> tauri::image::Image<'static> {
-    let (rgba, width, height) = render_battery_badge(level);
+    let (rgba, width, height) = battery_badge_square(level);
     tauri::image::Image::new_owned(rgba, width, height)
 }
 
@@ -1503,9 +1487,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_bundle_for_executable, battery_badge_pill, battery_badge_square,
-        launched_by_autostart, parse_battery_level, rc003_connected, silent_start_enabled_in,
-        tray_tooltip_text, write_silent_start, AUTO_LAUNCH_ARG,
+        app_bundle_for_executable, battery_badge_square, launched_by_autostart,
+        parse_battery_level, rc003_connected, silent_start_enabled_in, tray_tooltip_text,
+        write_silent_start, AUTO_LAUNCH_ARG,
     };
 
     #[test]
@@ -1522,28 +1506,6 @@ mod tests {
         assert_eq!(parse_battery_level("100"), Some(100));
         assert_eq!(parse_battery_level("101"), None);
         assert_eq!(parse_battery_level("unknown"), None);
-    }
-
-    #[test]
-    fn tray_badge_renders_pill_with_text() {
-        let (rgba, width, height) = battery_badge_pill(Some(85));
-        assert!(width > height);
-        assert_eq!(height, 44);
-        assert_eq!(rgba.len() as u32, width * height * 4);
-
-        let pixel = |x: u32, y: u32| &rgba[((y * width + x) * 4) as usize..][..4];
-        // Pill corners stay transparent, the center is filled, and the
-        // digits paint white pixels somewhere inside.
-        assert_eq!(pixel(0, 0)[3], 0);
-        assert_eq!(pixel(width - 1, height - 1)[3], 0);
-        assert!(pixel(width / 2, height / 2)[3] > 0);
-        assert!(rgba
-            .chunks_exact(4)
-            .any(|px| px == [255, 255, 255, 255]));
-
-        let (wide, wide_width, _) = battery_badge_pill(Some(100));
-        assert!(wide_width > width);
-        assert!(!wide.is_empty());
     }
 
     #[test]
