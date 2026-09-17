@@ -15,6 +15,9 @@ const PERMISSION_HELPER_HEIGHT: f64 = 560.0;
 const RUNTIME_LOG_FILE_BASENAME: &str = "axonkey";
 const RUNTIME_LOG_MAX_BYTES: u128 = 5_000_000;
 const RUNTIME_LOG_KEEP_FILES: usize = 5;
+const AUTO_LAUNCH_ARG: &str = "--auto-launched";
+const SILENT_START_FILE: &str = "silent-start";
+const AUTOSTART_ARGS_MARKER: &str = "autostart-args-v1";
 
 #[derive(Clone, Copy)]
 struct WindowGeometry {
@@ -32,20 +35,46 @@ fn initialize_autostart(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error
 
     let directory = app.path().app_config_dir()?;
     let marker = directory.join("autostart-initialized");
-    // Apply the default once, preserving subsequent changes made by the user.
-    if marker.try_exists()? {
-        return Ok(());
-    }
-    std::fs::create_dir_all(&directory)?;
     let autostart = app.autolaunch();
-    if !autostart.is_enabled()? {
+    // Apply the default once, preserving subsequent changes made by the user.
+    if !marker.try_exists()? {
+        std::fs::create_dir_all(&directory)?;
+        if !autostart.is_enabled()? {
+            autostart.enable()?;
+        }
+        if !autostart.is_enabled()? {
+            return Err("Autostart did not become enabled".into());
+        }
+        std::fs::write(marker, b"initialized\n")?;
+    }
+    // Silent start detects autostart launches through the launch argument;
+    // rewrite registrations created before the argument existed.
+    let args_marker = directory.join(AUTOSTART_ARGS_MARKER);
+    if autostart.is_enabled()? && !args_marker.try_exists()? {
         autostart.enable()?;
+        std::fs::write(&args_marker, b"initialized\n")?;
     }
-    if !autostart.is_enabled()? {
-        return Err("Autostart did not become enabled".into());
-    }
-    std::fs::write(marker, b"initialized\n")?;
     Ok(())
+}
+
+fn launched_by_autostart(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == AUTO_LAUNCH_ARG)
+}
+
+fn silent_start_enabled_in(directory: &std::path::Path) -> bool {
+    std::fs::read_to_string(directory.join(SILENT_START_FILE))
+        .map(|content| content.trim() == "1")
+        .unwrap_or(false)
+}
+
+fn write_silent_start(directory: &std::path::Path, enabled: bool) -> Result<(), String> {
+    std::fs::create_dir_all(directory)
+        .map_err(|error| format!("Cannot create the Axonkey config directory: {error}"))?;
+    std::fs::write(
+        directory.join(SILENT_START_FILE),
+        if enabled { "1\n" } else { "0\n" },
+    )
+    .map_err(|error| format!("Cannot save the silent start setting: {error}"))
 }
 
 fn app_bundle_for_executable(executable: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -209,6 +238,25 @@ fn install_tray(_app: &tauri::App) -> tauri::Result<()> {
 #[tauri::command]
 fn ping() -> &'static str {
     "ok"
+}
+
+#[tauri::command]
+fn get_silent_start(app: tauri::AppHandle) -> bool {
+    app.path()
+        .app_config_dir()
+        .map(|directory| silent_start_enabled_in(&directory))
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_silent_start(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("Cannot resolve the Axonkey config directory: {error}"))?;
+    write_silent_start(&directory, enabled)?;
+    log::info!(target: "axonkey::runtime", "Silent start setting updated: enabled={enabled}");
+    Ok(())
 }
 
 #[derive(serde::Serialize)]
@@ -1122,7 +1170,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            Some(vec![AUTO_LAUNCH_ARG]),
         ))
         .setup(|app| {
             use tauri::Manager;
@@ -1151,6 +1199,22 @@ pub fn run() {
             }
             if let Err(error) = initialize_autostart(app.handle()) {
                 log::warn!(target: "axonkey::runtime", "Cannot initialize autostart: {error}");
+            }
+            let silent_start = launched_by_autostart(
+                &std::env::args().collect::<Vec<_>>(),
+            ) && app
+                .path()
+                .app_config_dir()
+                .map(|directory| silent_start_enabled_in(&directory))
+                .unwrap_or(false);
+            if silent_start {
+                log::info!(target: "axonkey::runtime", "Silent start: keeping the main window hidden");
+                #[cfg(target_os = "macos")]
+                let _ = app
+                    .handle()
+                    .set_activation_policy(tauri::ActivationPolicy::Accessory);
+            } else {
+                show_main_window(app.handle());
             }
             app.manage(AudioService::start());
             app.manage(InputService::start());
@@ -1182,6 +1246,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ping,
+            get_silent_start,
+            set_silent_start,
             get_platform,
             get_log_info,
             open_log_directory,
@@ -1221,7 +1287,10 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{app_bundle_for_executable, parse_battery_level, rc003_connected};
+    use super::{
+        app_bundle_for_executable, launched_by_autostart, parse_battery_level, rc003_connected,
+        silent_start_enabled_in, write_silent_start, AUTO_LAUNCH_ARG,
+    };
 
     #[test]
     fn macos_connection_uses_bluetooth_when_hid_is_not_visible() {
@@ -1250,5 +1319,25 @@ mod tests {
             app_bundle_for_executable(std::path::Path::new("/tmp/axonkey")),
             None
         );
+    }
+
+    #[test]
+    fn silent_start_defaults_to_off_and_round_trips() {
+        let directory = std::env::temp_dir()
+            .join(format!("axonkey-silent-start-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(!silent_start_enabled_in(&directory));
+        write_silent_start(&directory, true).unwrap();
+        assert!(silent_start_enabled_in(&directory));
+        write_silent_start(&directory, false).unwrap();
+        assert!(!silent_start_enabled_in(&directory));
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn detects_only_autostart_launch_arguments() {
+        assert!(launched_by_autostart(&["axonkey".into(), AUTO_LAUNCH_ARG.into()]));
+        assert!(!launched_by_autostart(&["axonkey".into()]));
+        assert!(!launched_by_autostart(&["axonkey".into(), "--auto-launched=1".into()]));
     }
 }
