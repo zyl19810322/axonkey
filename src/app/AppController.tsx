@@ -217,7 +217,7 @@ function AppController() {
     window.addEventListener('keydown', handleEscapeFailsafe, true)
     return () => window.removeEventListener('keydown', handleEscapeFailsafe, true)
   }, [mouseEnabled])
-  const { audioGain, gainError, updateAudioGain } = useAudioControls({
+  const { audioGain, gainError, updateAudioGain, smartGain, updateSmartGain } = useAudioControls({
     platform,
     nativeRuntime,
     onToast: setToast,
@@ -1448,7 +1448,7 @@ function AppController() {
         onClose={() => setTextInputDraft(null)}
         onSave={commitTextInputPreset}
       />}
-      {audioTestOpen && <AudioTestDialog platform={platform} nativeRuntime={nativeRuntime} audioGain={audioGain} gainError={gainError} onAudioGainChange={updateAudioGain} onClose={() => setAudioTestOpen(false)} />}
+      {audioTestOpen && <AudioTestDialog platform={platform} nativeRuntime={nativeRuntime} audioGain={audioGain} gainError={gainError} smartGain={smartGain} onAudioGainChange={updateAudioGain} onSmartGainChange={updateSmartGain} onClose={() => setAudioTestOpen(false)} />}
       {setupOpen && <SetupDialog
         platform={platform}
         macPermissions={macPermissions}

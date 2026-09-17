@@ -9,12 +9,14 @@ type AudioLevel = { peak: number; rms: number }
 
 const decibels = (value: number) => value > 0 ? `${(20 * Math.log10(value)).toFixed(1)} dBFS` : '−∞ dBFS'
 
-export function AudioTestDialog({ platform, nativeRuntime, audioGain, gainError, onAudioGainChange, onClose }: {
+export function AudioTestDialog({ platform, nativeRuntime, audioGain, gainError, smartGain, onAudioGainChange, onSmartGainChange, onClose }: {
   platform: Platform
   nativeRuntime: boolean
   audioGain: number
   gainError: string
+  smartGain: boolean
   onAudioGainChange: (gain: number) => void
+  onSmartGainChange: (enabled: boolean) => void
   onClose: () => void
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null)
@@ -98,16 +100,17 @@ export function AudioTestDialog({ platform, nativeRuntime, audioGain, gainError,
           <h3>1. 按住讲话，松开后调整</h3>
           <p>保持日常使用距离，说“音频测试，一二三”，持续几秒。</p>
           <p><strong>按键声过滤：</strong>每次按下语音键后的前 200ms（0.2 秒）不计入测试电平和增益建议，避免按键声干扰判断。仅影响测试统计，正常语音仍完整传输，不会被裁剪或静音。</p>
-          <div className="audio-test-gain-heading"><label htmlFor="audio-test-gain">输入增益</label><output htmlFor="audio-test-gain">{audioGain > 0 ? '+' : ''}{audioGain} dB</output></div>
+          <div className="audio-test-gain-heading"><label htmlFor="audio-test-gain">输入增益</label><output htmlFor="audio-test-gain">{smartGain ? '智能调整中' : `${audioGain > 0 ? '+' : ''}${audioGain} dB`}</output></div>
           <div className="audio-test-gain-controls">
-            <button type="button" className="dialog-secondary" aria-label="降低 1 dB" title="降低 1 dB" disabled={!supported || audioGain <= audioGainMin} onClick={() => onAudioGainChange(audioGain - 1)}><Minus size={16} /></button>
-            <input id="audio-test-gain" type="range" min={audioGainMin} max={audioGainMax} step={1} value={audioGain} disabled={!supported} onChange={(event) => onAudioGainChange(Number(event.target.value))} />
-            <button type="button" className="dialog-secondary" aria-label="提高 1 dB" title="提高 1 dB" disabled={!supported || audioGain >= audioGainMax} onClick={() => onAudioGainChange(audioGain + 1)}><Plus size={16} /></button>
-            <button type="button" className="dialog-secondary" aria-label="恢复默认增益 0 dB" title="恢复默认增益 0 dB" disabled={!supported || audioGain === 0} onClick={() => onAudioGainChange(0)}><RotateCcw size={16} /></button>
+            <button type="button" className="dialog-secondary" aria-label="降低 1 dB" title="降低 1 dB" disabled={!supported || smartGain || audioGain <= audioGainMin} onClick={() => onAudioGainChange(audioGain - 1)}><Minus size={16} /></button>
+            <input id="audio-test-gain" type="range" min={audioGainMin} max={audioGainMax} step={1} value={audioGain} disabled={!supported || smartGain} onChange={(event) => onAudioGainChange(Number(event.target.value))} />
+            <button type="button" className="dialog-secondary" aria-label="提高 1 dB" title="提高 1 dB" disabled={!supported || smartGain || audioGain >= audioGainMax} onClick={() => onAudioGainChange(audioGain + 1)}><Plus size={16} /></button>
+            <button type="button" className="dialog-secondary" aria-label="恢复默认增益 0 dB" title="恢复默认增益 0 dB" disabled={!supported || smartGain || audioGain === 0} onClick={() => onAudioGainChange(0)}><RotateCcw size={16} /></button>
           </div>
-          <p>无需追求固定数值，设置自动保存并与首页同步。</p>
+          <label className="audio-test-smart-gain"><input type="checkbox" checked={smartGain} disabled={!supported} onChange={(event) => onSmartGainChange(event.target.checked)} /> 智能增益<span>根据声音大小自动调整，说话轻时提高、声音大时压低，静音时不放大底噪。开启后手动增益暂不生效。</span></label>
+          <p>{smartGain ? '智能增益已开启，建议滑条仅作参考。' : '无需追求固定数值，设置自动保存并与首页同步。'}</p>
           {completed && maximum >= 0.999 ? <p className="audio-test-gain-error">原始输入已接近满幅，降低软件增益无法修复源头失真。请远离麦克风或降低说话音量，再次按住语音键测试。</p>
-            : <div className="audio-test-suggestion"><span>{!completed ? '按住语音键讲话，松开后自动计算建议。' : suggestedGain === null ? '本次测试无法给出建议，请再次按住语音键测试。' : `建议增益 ${suggestedGain > 0 ? '+' : ''}${suggestedGain} dB。`}</span><button type="button" className="dialog-secondary" disabled={!ready || suggestedGain === null || suggestedGain === audioGain} onClick={() => { if (suggestedGain !== null) onAudioGainChange(suggestedGain) }}>应用建议</button></div>}
+            : <div className="audio-test-suggestion"><span>{!completed ? '按住语音键讲话，松开后自动计算建议。' : suggestedGain === null ? '本次测试无法给出建议，请再次按住语音键测试。' : `建议增益 ${suggestedGain > 0 ? '+' : ''}${suggestedGain} dB。`}</span><button type="button" className="dialog-secondary" disabled={!ready || smartGain || suggestedGain === null || suggestedGain === audioGain} onClick={() => { if (suggestedGain !== null) onAudioGainChange(suggestedGain) }}>应用建议</button></div>}
           {gainError && <p role="alert" className="audio-test-gain-error">{gainError}</p>}
         </section>
         <section className={`audio-test-meter ${tone}`}>

@@ -28,6 +28,9 @@ pub(crate) fn clamp_gain_db(gain: i16) -> i16 {
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", test))]
+mod agc;
+
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 mod atvv;
 
 #[cfg(any(target_os = "windows", target_os = "macos", test))]
@@ -64,6 +67,11 @@ impl AudioService {
     pub fn set_gain_db(&self, _gain: i16) -> Result<(), String> {
         log::warn!(target: "axonkey::audio", "Audio gain requested on an unsupported platform");
         Err("音频增益仅支持 macOS 音频转发".into())
+    }
+
+    pub fn set_smart_gain(&self, _enabled: bool) -> Result<(), String> {
+        log::warn!(target: "axonkey::audio", "Smart gain requested on an unsupported platform");
+        Err("智能增益仅支持 macOS 与 Windows 音频转发".into())
     }
 
     pub fn status(&self) -> AudioServiceStatus {

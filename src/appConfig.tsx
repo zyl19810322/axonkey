@@ -102,6 +102,16 @@ export function getStoredAudioGain() {
   }
 }
 
+export function getStoredSmartGain() {
+  if (typeof window === 'undefined') return false
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(audioSettingsStorageKey) ?? '{}') as Record<string, unknown>
+    return parsed.smartGain === true
+  } catch {
+    return false
+  }
+}
+
 export const iconFor = (kind: RemoteButton['icon'], size = 16) => {
   const props = { size, strokeWidth: 1.8 }
   switch (kind) {

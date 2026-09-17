@@ -1,8 +1,11 @@
-use super::{atvv::AtvvDecoder, clamp_gain_db, diagnostics::AudioDiagnostics, AudioServiceStatus};
+use super::{
+    agc::AutoGain, atvv::AtvvDecoder, clamp_gain_db, diagnostics::AudioDiagnostics,
+    AudioServiceStatus,
+};
 use std::{
     ffi::{c_char, c_void},
     sync::{
-        atomic::{AtomicPtr, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -53,6 +56,9 @@ struct Shared {
     diagnostics: AudioDiagnostics,
     bridge: AtomicPtr<c_void>,
     decoder: Mutex<AtvvDecoder>,
+    smart_gain: AtomicBool,
+    manual_gain_db: AtomicI32,
+    agc: Mutex<AutoGain>,
 }
 
 pub struct AudioService {
@@ -74,6 +80,9 @@ impl AudioService {
             diagnostics: AudioDiagnostics::default(),
             bridge: AtomicPtr::new(std::ptr::null_mut()),
             decoder: Mutex::new(AtvvDecoder::default()),
+            smart_gain: AtomicBool::new(false),
+            manual_gain_db: AtomicI32::new(0),
+            agc: Mutex::new(AutoGain::default()),
         });
         let callback_context = Arc::into_raw(Arc::clone(&shared));
         let callbacks = NativeCallbacks {
@@ -126,7 +135,31 @@ impl AudioService {
         }
         let gain_db = clamp_gain_db(gain);
         log::info!(target: "axonkey::audio", "Updating audio gain to {gain_db} dB");
-        unsafe { axonkey_macos_audio_set_gain_db(bridge, f32::from(gain_db)) };
+        self.shared
+            .manual_gain_db
+            .store(i32::from(gain_db), Ordering::Release);
+        // While smart gain is on, the AGC shapes the samples in Rust and the
+        // bridge stays at unity gain.
+        if !self.shared.smart_gain.load(Ordering::Acquire) {
+            unsafe { axonkey_macos_audio_set_gain_db(bridge, f32::from(gain_db)) };
+        }
+        Ok(())
+    }
+
+    pub fn set_smart_gain(&self, enabled: bool) -> Result<(), String> {
+        let bridge = self.shared.bridge.load(Ordering::Acquire);
+        if bridge.is_null() {
+            log::error!(target: "axonkey::audio", "Cannot toggle smart gain because the macOS bridge is unavailable");
+            return Err("无法连接 macOS 音频服务".into());
+        }
+        log::info!(target: "axonkey::audio", "Smart gain enabled={enabled}");
+        self.shared.smart_gain.store(enabled, Ordering::Release);
+        let bridge_gain = if enabled {
+            0.0
+        } else {
+            self.shared.manual_gain_db.load(Ordering::Acquire) as f32
+        };
+        unsafe { axonkey_macos_audio_set_gain_db(bridge, bridge_gain) };
         Ok(())
     }
 
@@ -229,8 +262,14 @@ unsafe extern "C" fn native_event_callback(
             let frames = decoder.append(packet, value1.max(1) as usize);
             drop(decoder);
             let bridge = shared.bridge.load(Ordering::Acquire);
-            for samples in frames {
+            let smart_gain = shared.smart_gain.load(Ordering::Acquire);
+            for mut samples in frames {
                 shared.diagnostics.decoded(&samples);
+                if smart_gain {
+                    if let Ok(mut agc) = shared.agc.lock() {
+                        agc.process(&mut samples, 16_000);
+                    }
+                }
                 let success = !bridge.is_null()
                     && axonkey_macos_audio_enqueue(bridge, samples.as_ptr(), samples.len());
                 shared.diagnostics.scheduled(samples.len(), success);
@@ -287,6 +326,9 @@ mod tests {
             diagnostics: AudioDiagnostics::default(),
             bridge: AtomicPtr::new(std::ptr::null_mut()),
             decoder: Mutex::new(AtvvDecoder::default()),
+            smart_gain: AtomicBool::new(false),
+            manual_gain_db: AtomicI32::new(0),
+            agc: Mutex::new(AutoGain::default()),
         };
         let context = (&shared as *const Shared).cast_mut().cast();
         let packet = [0x11; 120];
@@ -318,6 +360,9 @@ mod tests {
             diagnostics: AudioDiagnostics::default(),
             bridge: AtomicPtr::new(std::ptr::null_mut()),
             decoder: Mutex::new(AtvvDecoder::default()),
+            smart_gain: AtomicBool::new(false),
+            manual_gain_db: AtomicI32::new(0),
+            agc: Mutex::new(AutoGain::default()),
         };
         let context = (&shared as *const Shared).cast_mut().cast();
         let _guard = shared.decoder.lock().unwrap();

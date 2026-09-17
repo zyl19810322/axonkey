@@ -8,7 +8,6 @@ use tauri::{Manager, PhysicalPosition, PhysicalSize};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 const MAIN_WINDOW_LABEL: &str = "main";
-const TRAY_ID: &str = "axonkey-tray";
 const TRAY_BATTERY_ICON_ID: &str = "axonkey-battery-tray";
 const TRAY_SHOW_ID: &str = "tray-show";
 const TRAY_QUIT_ID: &str = "tray-quit";
@@ -34,8 +33,8 @@ struct PermissionHelperWindowState(std::sync::Mutex<Option<WindowGeometry>>);
 
 fn tray_tooltip_text(level: Option<u8>) -> String {
     match level {
-        Some(level) => format!("遥控器电量 {level}%"),
-        None => "遥控器未连接".to_string(),
+        Some(level) => format!("Axonkey · 遥控器电量 {level}%"),
+        None => "Axonkey · 遥控器未连接".to_string(),
     }
 }
 
@@ -339,6 +338,7 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "退出 Axonkey", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
 
+    // The battery badge doubles as the only tray icon.
     let battery = TrayIconBuilder::with_id(TRAY_BATTERY_ICON_ID)
         .icon(battery_badge_image(None))
         .tooltip(tray_tooltip_text(None))
@@ -371,39 +371,6 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
             })
     };
     battery.build(app)?;
-
-    let tray = TrayIconBuilder::with_id(TRAY_ID)
-        .icon(tauri::include_image!("./icons/32x32.png"))
-        .tooltip("Axonkey")
-        .menu(&menu)
-        .on_menu_event(|app, event| {
-            if event.id() == TRAY_SHOW_ID {
-                show_main_window(app);
-            } else if event.id() == TRAY_QUIT_ID {
-                app.exit(0);
-            }
-        });
-
-    #[cfg(target_os = "windows")]
-    let tray = {
-        use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
-
-        tray.show_menu_on_left_click(false)
-            .on_tray_icon_event(|tray, event| {
-                if matches!(
-                    event,
-                    TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    }
-                ) {
-                    show_main_window(tray.app_handle());
-                }
-            })
-    };
-
-    tray.build(app)?;
     Ok(())
 }
 
@@ -1166,6 +1133,14 @@ fn set_audio_gain(gain: i16, audio_service: tauri::State<'_, AudioService>) -> R
 }
 
 #[tauri::command]
+fn set_smart_gain_enabled(
+    enabled: bool,
+    audio_service: tauri::State<'_, AudioService>,
+) -> Result<(), String> {
+    audio_service.set_smart_gain(enabled)
+}
+
+#[tauri::command]
 async fn probe_rc003_connected(app: tauri::AppHandle) -> Result<bool, String> {
     use tauri::Manager;
 
@@ -1461,6 +1436,7 @@ pub fn run() {
             probe_audio_state,
             get_audio_test_state,
             set_audio_gain,
+            set_smart_gain_enabled,
             probe_rc003_connected,
             probe_rc003_battery_level,
             set_tray_battery,
@@ -1527,8 +1503,8 @@ mod tests {
 
     #[test]
     fn tray_tooltip_reflects_battery_state() {
-        assert_eq!(tray_tooltip_text(Some(85)), "遥控器电量 85%");
-        assert_eq!(tray_tooltip_text(None), "遥控器未连接");
+        assert_eq!(tray_tooltip_text(Some(85)), "Axonkey · 遥控器电量 85%");
+        assert_eq!(tray_tooltip_text(None), "Axonkey · 遥控器未连接");
     }
 
     #[test]

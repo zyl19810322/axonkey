@@ -1,4 +1,7 @@
-use super::{atvv::AtvvDecoder, clamp_gain_db, diagnostics::AudioDiagnostics, AudioServiceStatus};
+use super::{
+    agc::AutoGain, atvv::AtvvDecoder, clamp_gain_db, diagnostics::AudioDiagnostics,
+    AudioServiceStatus,
+};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     FromSample, Sample, SampleFormat, SizedSample, StreamConfig, I24, U24,
@@ -71,6 +74,8 @@ struct Shared {
     decoder: Mutex<AtvvDecoder>,
     samples: Mutex<VecDeque<i16>>,
     gain_db: AtomicI32,
+    smart_gain: AtomicBool,
+    agc: Mutex<AutoGain>,
     stop: AtomicBool,
     audio_refresh: AtomicBool,
     ble_refresh: AtomicBool,
@@ -91,6 +96,8 @@ impl Shared {
             decoder: Mutex::new(AtvvDecoder::default()),
             samples: Mutex::new(VecDeque::new()),
             gain_db: AtomicI32::new(0),
+            smart_gain: AtomicBool::new(false),
+            agc: Mutex::new(AutoGain::default()),
             stop: AtomicBool::new(false),
             audio_refresh: AtomicBool::new(false),
             ble_refresh: AtomicBool::new(false),
@@ -217,6 +224,12 @@ impl AudioService {
         self.shared
             .gain_db
             .store(i32::from(clamp_gain_db(gain)), Ordering::Release);
+        Ok(())
+    }
+
+    pub fn set_smart_gain(&self, enabled: bool) -> Result<(), String> {
+        log::info!(target: "axonkey::audio", "Smart gain enabled={enabled}");
+        self.shared.smart_gain.store(enabled, Ordering::Release);
         Ok(())
     }
 
@@ -460,7 +473,12 @@ where
         shared.diagnostics.output(0, output_frames, false);
         return;
     }
-    let gain_db = shared.gain_db.load(Ordering::Acquire) as f32;
+    let gain_db = if shared.smart_gain.load(Ordering::Acquire) {
+        // AGC already shaped the samples at enqueue time.
+        0.0
+    } else {
+        shared.gain_db.load(Ordering::Acquire) as f32
+    };
     let gain = 10.0_f32.powf(gain_db / 20.0);
     let mut filled_frames = 0;
     for frame in output.chunks_mut(channels) {
@@ -985,7 +1003,13 @@ fn handle_audio_packet(shared: &Shared, bytes: &[u8]) {
         shared.diagnostics.decoded(frame);
     }
     if let Ok(mut queued) = shared.samples.lock() {
-        for frame in frames {
+        let smart_gain = shared.smart_gain.load(Ordering::Acquire);
+        for mut frame in frames {
+            if smart_gain {
+                if let Ok(mut agc) = shared.agc.lock() {
+                    agc.process(&mut frame, SOURCE_SAMPLE_RATE);
+                }
+            }
             let overflow = queued
                 .len()
                 .saturating_add(frame.len())
