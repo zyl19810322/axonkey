@@ -329,12 +329,6 @@ function AppController() {
 
   useEffect(() => {
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
-    invoke('set_tray_battery', { level: batteryLevel })
-      .catch((error) => logError('Failed to update the tray battery label', error))
-  }, [batteryLevel])
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
     let mounted = true
     let unlisten: (() => void) | undefined
     const clearPressed = () => {

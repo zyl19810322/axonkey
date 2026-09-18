@@ -8,7 +8,7 @@ use tauri::{Manager, PhysicalPosition, PhysicalSize};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 const MAIN_WINDOW_LABEL: &str = "main";
-const TRAY_BATTERY_ICON_ID: &str = "axonkey-battery-tray";
+const TRAY_ICON_ID: &str = "axonkey-tray";
 const TRAY_SHOW_ID: &str = "tray-show";
 const TRAY_QUIT_ID: &str = "tray-quit";
 const PERMISSION_HELPER_WIDTH: f64 = 430.0;
@@ -30,151 +30,6 @@ struct WindowGeometry {
 
 #[derive(Default)]
 struct PermissionHelperWindowState(std::sync::Mutex<Option<WindowGeometry>>);
-
-fn tray_tooltip_text(level: Option<u8>) -> String {
-    match level {
-        Some(level) => format!("Axonkey · 遥控器电量 {level}%"),
-        None => "Axonkey · 遥控器未连接".to_string(),
-    }
-}
-
-// 5x7 bitmap glyphs for the battery badge; each row uses the low 5 bits.
-fn badge_glyph_rows(ch: u8) -> [u8; 7] {
-    match ch {
-        b'0' => [14, 17, 19, 21, 25, 17, 14],
-        b'1' => [4, 12, 4, 4, 4, 4, 14],
-        b'2' => [14, 17, 1, 6, 8, 16, 31],
-        b'3' => [31, 2, 4, 2, 1, 17, 14],
-        b'4' => [2, 6, 10, 18, 31, 2, 2],
-        b'5' => [31, 16, 30, 1, 1, 17, 14],
-        b'6' => [6, 8, 16, 30, 17, 17, 14],
-        b'7' => [31, 1, 2, 4, 8, 8, 8],
-        b'8' => [14, 17, 17, 14, 17, 17, 14],
-        b'9' => [14, 17, 17, 15, 1, 2, 12],
-        b'%' => [25, 26, 2, 4, 8, 11, 19],
-        b'-' => [0, 0, 0, 31, 0, 0, 0],
-        _ => [0; 7],
-    }
-}
-
-fn inside_rounded_rect(x: u32, y: u32, width: u32, height: u32, radius: u32) -> bool {
-    if (x >= radius && x < width - radius) || (y >= radius && y < height - radius) {
-        return true;
-    }
-    let center_x = if x < radius { radius } else { width - radius - 1 };
-    let center_y = if y < radius { radius } else { height - radius - 1 };
-    let dx = x as i64 - center_x as i64;
-    let dy = y as i64 - center_y as i64;
-    dx * dx + dy * dy <= radius as i64 * radius as i64
-}
-
-fn downsample_2x(rgba: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
-    let (out_width, out_height) = (width / 2, height / 2);
-    let mut out = vec![0u8; (out_width * out_height * 4) as usize];
-    for y in 0..out_height {
-        for x in 0..out_width {
-            let mut sum = [0u32; 4];
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let offset = (((y * 2 + dy) * width + x * 2 + dx) * 4) as usize;
-                    for (channel, value) in sum.iter_mut().enumerate() {
-                        *value += rgba[offset + channel] as u32;
-                    }
-                }
-            }
-            let offset = ((y * out_width + x) * 4) as usize;
-            for (channel, value) in sum.iter().enumerate() {
-                out[offset + channel] = (value / 4) as u8;
-            }
-        }
-    }
-    (out, out_width, out_height)
-}
-
-// Renders the battery text on a rounded-rectangle badge. All sizes are final
-// pixels; rendering happens at 2x and is downsampled for smooth edges.
-// `fixed_size` forces a canvas (used for the square Windows badge) and centers
-// the text; otherwise the canvas hugs the text with the given padding.
-fn render_badge(
-    text: &str,
-    glyph_scale: u32,
-    glyph_scale_y: u32,
-    pad_x: u32,
-    pad_y: u32,
-    corner_radius: u32,
-    fixed_size: Option<(u32, u32)>,
-) -> (Vec<u8>, u32, u32) {
-    const SS: u32 = 2;
-    const GLYPH_W: u32 = 5;
-    const GLYPH_H: u32 = 7;
-    const GLYPH_GAP: u32 = 1;
-
-    let glyph_count = text.len() as u32;
-    let text_width = (glyph_count * (GLYPH_W + GLYPH_GAP) - GLYPH_GAP) * glyph_scale * SS;
-    let text_height = GLYPH_H * glyph_scale_y * SS;
-    let (width, height) = match fixed_size {
-        Some((width, height)) => (width * SS, height * SS),
-        None => (
-            text_width + pad_x * 2 * SS,
-            text_height + pad_y * 2 * SS,
-        ),
-    };
-    let origin_x = (width - text_width) / 2;
-    let origin_y = (height - text_height) / 2;
-    let mut rgba = vec![0u8; (width * height * 4) as usize];
-
-    for y in 0..height {
-        for x in 0..width {
-            if inside_rounded_rect(x, y, width, height, corner_radius * SS) {
-                let offset = ((y * width + x) * 4) as usize;
-                rgba[offset..offset + 4].copy_from_slice(&[30, 30, 30, 235]);
-            }
-        }
-    }
-
-    let scale_x = glyph_scale * SS;
-    let scale_y = glyph_scale_y * SS;
-    let mut cursor_x = origin_x;
-    for ch in text.bytes() {
-        let rows = badge_glyph_rows(ch);
-        for (row, bits) in rows.iter().enumerate() {
-            for col in 0..GLYPH_W {
-                if bits & (1 << (GLYPH_W - 1 - col)) == 0 {
-                    continue;
-                }
-                for dy in 0..scale_y {
-                    for dx in 0..scale_x {
-                        let x = cursor_x + col * scale_x + dx;
-                        let y = origin_y + row as u32 * scale_y + dy;
-                        let offset = ((y * width + x) * 4) as usize;
-                        rgba[offset..offset + 4].copy_from_slice(&[255, 255, 255, 255]);
-                    }
-                }
-            }
-        }
-        cursor_x += (GLYPH_W + GLYPH_GAP) * scale_x;
-    }
-
-    downsample_2x(&rgba, width, height)
-}
-
-// Square badge for both platforms; the percentage sign is dropped to keep the
-// digits large enough to read in the tray slot. Two digits stretch slightly
-// taller than wide so the badge reads as large as neighboring tray icons;
-// three digits (100) shrink one step.
-fn battery_badge_square(level: Option<u8>) -> (Vec<u8>, u32, u32) {
-    let text = match level {
-        Some(level) => format!("{level}"),
-        None => "--".to_string(),
-    };
-    let (glyph_scale, glyph_scale_y) = if text.len() >= 3 { (3, 3) } else { (5, 6) };
-    render_badge(&text, glyph_scale, glyph_scale_y, 0, 0, 6, Some((64, 64)))
-}
-
-fn battery_badge_image(level: Option<u8>) -> tauri::image::Image<'static> {
-    let (rgba, width, height) = battery_badge_square(level);
-    tauri::image::Image::new_owned(rgba, width, height)
-}
 
 fn initialize_autostart(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     use tauri_plugin_autostart::ManagerExt;
@@ -342,10 +197,8 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "退出 Axonkey", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
 
-    // The battery badge doubles as the only tray icon.
-    let battery = TrayIconBuilder::with_id(TRAY_BATTERY_ICON_ID)
-        .icon(battery_badge_image(None))
-        .tooltip(tray_tooltip_text(None))
+    let mut tray = TrayIconBuilder::with_id(TRAY_ICON_ID)
+        .tooltip("Axonkey")
         .menu(&menu)
         .on_menu_event(|app, event| {
             if event.id() == TRAY_SHOW_ID {
@@ -354,12 +207,15 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
                 app.exit(0);
             }
         });
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray = tray.icon(icon);
+    }
 
     #[cfg(target_os = "windows")]
-    let battery = {
+    let tray = {
         use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
 
-        battery
+        tray
             .show_menu_on_left_click(false)
             .on_tray_icon_event(|tray, event| {
                 if matches!(
@@ -374,7 +230,7 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
                 }
             })
     };
-    battery.build(app)?;
+    tray.build(app)?;
     Ok(())
 }
 
@@ -1078,27 +934,6 @@ async fn probe_rc003_battery_level(app: tauri::AppHandle) -> Option<u8> {
 }
 
 #[tauri::command]
-fn set_tray_battery(app: tauri::AppHandle, level: Option<u8>) -> Result<(), String> {
-    let level = level.filter(|value| *value <= 100);
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    {
-        if let Some(tray) = app.tray_by_id(TRAY_BATTERY_ICON_ID) {
-            tray.set_icon(Some(battery_badge_image(level)))
-                .map_err(|error| format!("Cannot update the tray battery badge: {error}"))?;
-            tray.set_tooltip(Some(tray_tooltip_text(level)))
-                .map_err(|error| format!("Cannot update the tray battery tooltip: {error}"))?;
-        }
-        Ok(())
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        let _ = (app, level);
-        Ok(())
-    }
-}
-
-#[tauri::command]
 fn probe_audio_available(audio_service: tauri::State<'_, AudioService>) -> Result<bool, String> {
     #[cfg(target_os = "windows")]
     {
@@ -1443,7 +1278,6 @@ pub fn run() {
             set_smart_gain_enabled,
             probe_rc003_connected,
             probe_rc003_battery_level,
-            set_tray_battery,
             update_input_settings,
             get_extra_keys_status,
             set_extra_keys_enabled,
@@ -1467,9 +1301,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_bundle_for_executable, battery_badge_square, launched_by_autostart,
-        parse_battery_level, rc003_connected, silent_start_enabled_in, tray_tooltip_text,
-        write_silent_start, AUTO_LAUNCH_ARG,
+        app_bundle_for_executable, launched_by_autostart, parse_battery_level,
+        rc003_connected, silent_start_enabled_in, write_silent_start, AUTO_LAUNCH_ARG,
     };
 
     #[test]
@@ -1486,29 +1319,6 @@ mod tests {
         assert_eq!(parse_battery_level("100"), Some(100));
         assert_eq!(parse_battery_level("101"), None);
         assert_eq!(parse_battery_level("unknown"), None);
-    }
-
-    #[test]
-    fn tray_badge_square_fits_windows_tray_slot() {
-        let (rgba, width, height) = battery_badge_square(Some(85));
-        assert_eq!((width, height), (64, 64));
-        assert_eq!(rgba.len() as u32, width * height * 4);
-
-        let pixel = |x: u32, y: u32| &rgba[((y * width + x) * 4) as usize..][..4];
-        assert_eq!(pixel(0, 0)[3], 0);
-        assert!(pixel(32, 32)[3] > 0);
-        assert!(rgba
-            .chunks_exact(4)
-            .any(|px| px == [255, 255, 255, 255]));
-
-        let (_, wide_width, wide_height) = battery_badge_square(Some(100));
-        assert_eq!((wide_width, wide_height), (64, 64));
-    }
-
-    #[test]
-    fn tray_tooltip_reflects_battery_state() {
-        assert_eq!(tray_tooltip_text(Some(85)), "Axonkey · 遥控器电量 85%");
-        assert_eq!(tray_tooltip_text(None), "Axonkey · 遥控器未连接");
     }
 
     #[test]
