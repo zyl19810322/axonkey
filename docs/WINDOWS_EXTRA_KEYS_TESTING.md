@@ -6,6 +6,65 @@ The packaged Windows app embeds Frida Gadget and starts its own native helper
 with `ShellExecuteExW` / `runas`. This replaces Python for production; the older
 standalone diagnostic remains available for comparison.
 
+## Named-pipe migration (2026-09-17)
+
+### Windows connection timeout fix (2026-09-17)
+
+The installed 0.3.9-rc.1 log showed a capture-component timeout after 25 seconds;
+0.3.8 had reached ready on the same machine. The pipe DACL granted LocalService
+`0x00100003` (data read/write and synchronize), but native `CreateFileW` also
+checks `FILE_READ_ATTRIBUTES` when opening the pipe. Adding that bit changes the
+grant to `0x00100083`, without granting `FILE_CREATE_PIPE_INSTANCE`. Gadget's
+requested access, script revision, PID verification and credential are unchanged.
+
+A Windows regression test substitutes the test user's group for LocalService
+and restricts its token to that grant, so owner/admin full access cannot hide the
+bug. It uses Gadget's exact access and overlapped/anonymous-SQOS flags, verifies
+bidirectional data, and rejects attempts to create another server instance.
+The old grant failed with Windows error 5; the corrected grant passed. All 43
+Windows input-service tests and 8 Node Gadget/UI tests passed. A separate process
+also loaded the embedded Frida DLL and completed a real script/pipe handshake.
+
+The rebuilt release helper was then run through UAC against this machine's
+actual RC003 WUDFHost and the resident Gadget. It reported `starting` at 3.67 s
+and `ready` at 5.08 s from diagnostic launch (including UAC), remained healthy
+for another 12.91 s, and exited within 5 s after the parent closed its pipe.
+This capture-only probe sent no mappings. The NSIS installer build passed;
+installed UI mapping output and physical press/release edges were not retested.
+
+For direct Cargo tests on this checkout, the existing unconditional
+`macos-private-api` feature requires the matching build-config override in
+PowerShell (the setting has no Windows runtime effect):
+
+```powershell
+$env:TAURI_CONFIG='{"app":{"macOSPrivateApi":true}}'
+cargo test --manifest-path src-tauri/Cargo.toml --lib input_service
+```
+
+### Original migration validation
+
+Both production TCP hops have been replaced with local-only Windows named pipes.
+The app/helper channel uses a random name per authorization; the helper/Gadget
+channel uses the script revision. PID checks, token authentication and the JSON
+framing remain in place. The listener reserves the pipe name across reconnects
+and rejects remote clients. LocalService gets data read/write rights without
+permission to create a competing server instance. Clients use anonymous SQOS.
+
+Rust uses Tokio overlapped pipe I/O with bounded idle reads and writes. Gadget
+opens the native handle with `CreateFileW`, wraps it in Frida's
+[`Win32InputStream` / `Win32OutputStream`](https://frida.re/docs/javascript-api/#win32inputstream), and closes the handle once both streams
+have canceled/drained. Bind/accept errors retain the pipe name, error kind and
+original Windows error code in the app's runtime log.
+
+Validation on macOS: the 8 Node tests and 43 available Rust input-service tests
+passed. The actual Windows pipe, helper, WinAPI and protocol modules, including
+their Windows-only tests, passed `cargo check --tests` for
+`x86_64-pc-windows-msvc` in an isolated harness. This checks types, not linking or
+native execution. Windows tests cover PID lookup, name ownership, timeout and
+reconnect, bidirectional transfer, clone shutdown and a peer that stops reading.
+They still need execution on Windows, followed by UAC / LocalService / RC003
+smoke testing. Historical TCP measurements below do not validate this transport.
+
 ## Automated checks (2026-09-10)
 
 - `npm run tauri build -- --bundles nsis`: passed, including pinned DLL hash check.
